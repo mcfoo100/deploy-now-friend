@@ -14,7 +14,45 @@ export type Database = {
   }
   public: {
     Tables: {
-      [_ in never]: never
+      weekend_progress: {
+        Row: {
+          date_completed: string
+          done: boolean
+          hours_spent: number
+          id: string
+          notes: string
+          quality: number
+          time_saved: number
+          updated_at: string
+          user_id: string
+          weekend_id: string
+        }
+        Insert: {
+          date_completed?: string
+          done?: boolean
+          hours_spent?: number
+          id?: string
+          notes?: string
+          quality?: number
+          time_saved?: number
+          updated_at?: string
+          user_id: string
+          weekend_id: string
+        }
+        Update: {
+          date_completed?: string
+          done?: boolean
+          hours_spent?: number
+          id?: string
+          notes?: string
+          quality?: number
+          time_saved?: number
+          updated_at?: string
+          user_id?: string
+          weekend_id?: string
+        }
+        Relationships: []
+      }
     }
     Views: {
       [_ in never]: never
