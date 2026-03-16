@@ -1,4 +1,6 @@
-import { useState, useEffect, useCallback } from "react";
+import { useState, useEffect, useCallback, useRef } from "react";
+import { supabase } from "@/integrations/supabase/client";
+import type { User } from "@supabase/supabase-js";
 
 const WEEKENDS = [
   { id: "d0",  num: "DAY 0", title: "Day Zero Setup",            deliverable: "Folders · Accounts · Rubric saved",        section: "FOUNDATION",     color: "#3b82f6" },
@@ -29,28 +31,13 @@ interface ItemState {
   time_saved: number;
   notes: string;
   date: string;
+  hours_spent: number;
 }
 
 type TrackerState = Record<string, ItemState>;
 
-const STORAGE_KEY = "ai-res-2026";
-
 function defaultItem(): ItemState {
-  return { done: false, quality: 0, time_saved: 0, notes: "", date: "" };
-}
-
-function loadState(): TrackerState {
-  try {
-    return JSON.parse(localStorage.getItem(STORAGE_KEY) || "{}");
-  } catch {
-    return {};
-  }
-}
-
-function saveState(s: TrackerState) {
-  try {
-    localStorage.setItem(STORAGE_KEY, JSON.stringify(s));
-  } catch {}
+  return { done: false, quality: 0, time_saved: 0, notes: "", date: "", hours_spent: 0 };
 }
 
 // ── Stars component ──────────────────────────────────────────────────────────
@@ -188,10 +175,7 @@ function ResolutionCard({
 
         <button
           className="text-[11px] bg-transparent border-none p-0 cursor-pointer transition-colors duration-150 mt-[2px]"
-          style={{
-            fontFamily: "'DM Sans', sans-serif",
-            color: "hsl(215 20% 27%)",
-          }}
+          style={{ fontFamily: "'DM Sans', sans-serif", color: "hsl(215 20% 27%)" }}
           onMouseEnter={(e) => ((e.target as HTMLButtonElement).style.color = "hsl(215 16% 37%)")}
           onMouseLeave={(e) => ((e.target as HTMLButtonElement).style.color = "hsl(215 20% 27%)")}
           onClick={(e) => { e.stopPropagation(); setNotesOpen((o) => !o); }}
@@ -224,12 +208,60 @@ function ResolutionCard({
 }
 
 // ── Main component ────────────────────────────────────────────────────────────
-export default function ResolutionTracker() {
-  const [state, setState] = useState<TrackerState>(loadState);
+export default function ResolutionTracker({ user }: { user: User }) {
+  const [state, setState] = useState<TrackerState>({});
+  const [loading, setLoading] = useState(true);
+  const saveTimers = useRef<Record<string, ReturnType<typeof setTimeout>>>({});
 
+  // Load all rows for this user on mount
   useEffect(() => {
-    saveState(state);
-  }, [state]);
+    const load = async () => {
+      const { data, error } = await supabase
+        .from("weekend_progress")
+        .select("*")
+        .eq("user_id", user.id);
+
+      if (!error && data) {
+        const loaded: TrackerState = {};
+        data.forEach((row) => {
+          loaded[row.weekend_id] = {
+            done: row.done,
+            quality: row.quality,
+            time_saved: row.time_saved,
+            notes: row.notes,
+            date: row.date_completed,
+            hours_spent: Number(row.hours_spent),
+          };
+        });
+        setState(loaded);
+      }
+      setLoading(false);
+    };
+    load();
+  }, [user.id]);
+
+  // Debounced upsert to Supabase
+  const saveRow = useCallback(
+    (id: string, item: ItemState) => {
+      if (saveTimers.current[id]) clearTimeout(saveTimers.current[id]);
+      saveTimers.current[id] = setTimeout(async () => {
+        await supabase.from("weekend_progress").upsert(
+          {
+            user_id: user.id,
+            weekend_id: id,
+            done: item.done,
+            quality: item.quality,
+            time_saved: item.time_saved,
+            notes: item.notes,
+            date_completed: item.date,
+            hours_spent: item.hours_spent,
+          },
+          { onConflict: "user_id,weekend_id" }
+        );
+      }, 400);
+    },
+    [user.id]
+  );
 
   const getItem = useCallback(
     (id: string): ItemState => state[id] ?? defaultItem(),
@@ -244,22 +276,32 @@ export default function ResolutionTracker() {
         s.date = new Date().toLocaleDateString("en-US", { month: "short", day: "numeric", year: "numeric" });
       }
       if (!s.done) s.date = "";
-      return { ...prev, [id]: s };
+      const next = { ...prev, [id]: s };
+      saveRow(id, s);
+      return next;
     });
   };
 
   const setScore = (id: string, field: "quality" | "time_saved", val: number) => {
-    setState((prev) => ({
-      ...prev,
-      [id]: { ...defaultItem(), ...prev[id], [field]: val },
-    }));
+    setState((prev) => {
+      const s = { ...defaultItem(), ...prev[id], [field]: val };
+      const next = { ...prev, [id]: s };
+      saveRow(id, s);
+      return next;
+    });
   };
 
   const setNotes = (id: string, val: string) => {
-    setState((prev) => ({
-      ...prev,
-      [id]: { ...defaultItem(), ...prev[id], notes: val },
-    }));
+    setState((prev) => {
+      const s = { ...defaultItem(), ...prev[id], notes: val };
+      const next = { ...prev, [id]: s };
+      saveRow(id, s);
+      return next;
+    });
+  };
+
+  const handleLogout = async () => {
+    await supabase.auth.signOut();
   };
 
   // Stats
@@ -274,11 +316,18 @@ export default function ResolutionTracker() {
       ? (qualityScores.reduce((a, b) => a + b, 0) / qualityScores.length).toFixed(1)
       : "—";
 
+  if (loading) {
+    return (
+      <div className="min-h-screen flex items-center justify-center" style={{ background: "hsl(222 25% 7%)" }}>
+        <div className="font-mono text-[13px]" style={{ color: "hsl(215 16% 37%)" }}>
+          Loading your progress…
+        </div>
+      </div>
+    );
+  }
+
   return (
-    <div
-      className="min-h-screen py-8 px-5 pb-16"
-      style={{ maxWidth: 680, margin: "0 auto" }}
-    >
+    <div className="min-h-screen py-8 px-5 pb-16" style={{ maxWidth: 680, margin: "0 auto" }}>
       {/* Header */}
       <div className="flex justify-between items-start mb-7 flex-wrap gap-4">
         <div>
@@ -292,25 +341,43 @@ export default function ResolutionTracker() {
             10-Weekend Path to AI Fluency · 2026
           </p>
         </div>
-        <div className="text-right">
-          <div className="font-mono font-bold leading-none" style={{ fontSize: 40, color: "#f1f5f9" }}>
-            {pct}
-            <span className="text-[22px]" style={{ color: "hsl(215 16% 37%)" }}>%</span>
+
+        <div className="flex items-start gap-4">
+          <div className="text-right">
+            <div className="font-mono font-bold leading-none" style={{ fontSize: 40, color: "#f1f5f9" }}>
+              {pct}
+              <span className="text-[22px]" style={{ color: "hsl(215 16% 37%)" }}>%</span>
+            </div>
+            <div className="text-[11px] uppercase tracking-[1.2px] mt-1" style={{ color: "hsl(215 16% 37%)" }}>
+              Complete
+            </div>
           </div>
-          <div
-            className="text-[11px] uppercase tracking-[1.2px] mt-1"
-            style={{ color: "hsl(215 16% 37%)" }}
+
+          {/* Logout */}
+          <button
+            onClick={handleLogout}
+            className="mt-1 rounded-[8px] border px-3 py-[6px] text-[11px] font-medium uppercase tracking-[0.8px] transition-colors duration-150"
+            style={{
+              background: "transparent",
+              borderColor: "hsl(217 26% 20%)",
+              color: "hsl(215 16% 37%)",
+            }}
+            onMouseEnter={(e) => {
+              (e.currentTarget as HTMLButtonElement).style.borderColor = "hsl(217 36% 26%)";
+              (e.currentTarget as HTMLButtonElement).style.color = "#cbd5e1";
+            }}
+            onMouseLeave={(e) => {
+              (e.currentTarget as HTMLButtonElement).style.borderColor = "hsl(217 26% 20%)";
+              (e.currentTarget as HTMLButtonElement).style.color = "hsl(215 16% 37%)";
+            }}
           >
-            Complete
-          </div>
+            Log out
+          </button>
         </div>
       </div>
 
       {/* Master progress bar */}
-      <div
-        className="h-[5px] rounded-[3px] overflow-hidden mb-6"
-        style={{ background: "hsl(224 24% 14%)" }}
-      >
+      <div className="h-[5px] rounded-[3px] overflow-hidden mb-6" style={{ background: "hsl(224 24% 14%)" }}>
         <div
           className="h-full rounded-[3px] transition-all duration-500"
           style={{
@@ -324,28 +391,19 @@ export default function ResolutionTracker() {
       {/* Stats row */}
       <div className="grid grid-cols-3 gap-[10px] mb-8">
         {[
-          { num: doneCount,          color: "#22c55e", label: "Done" },
-          { num: TOTAL - doneCount,  color: "#3b82f6", label: "Remaining" },
-          { num: avgQuality,         color: "#f59e0b", label: "Avg Quality" },
+          { num: doneCount,         color: "#22c55e", label: "Done" },
+          { num: TOTAL - doneCount, color: "#3b82f6", label: "Remaining" },
+          { num: avgQuality,        color: "#f59e0b", label: "Avg Quality" },
         ].map((s) => (
           <div
             key={s.label}
             className="rounded-[10px] border py-[14px] px-3 text-center"
-            style={{
-              background: "hsl(222 19% 10%)",
-              borderColor: "hsl(217 26% 20%)",
-            }}
+            style={{ background: "hsl(222 19% 10%)", borderColor: "hsl(217 26% 20%)" }}
           >
-            <div
-              className="font-mono text-[24px] font-bold leading-none mb-[5px]"
-              style={{ color: s.color }}
-            >
+            <div className="font-mono text-[24px] font-bold leading-none mb-[5px]" style={{ color: s.color }}>
               {s.num}
             </div>
-            <div
-              className="text-[10px] uppercase tracking-[1px]"
-              style={{ color: "hsl(215 16% 37%)" }}
-            >
+            <div className="text-[10px] uppercase tracking-[1px]" style={{ color: "hsl(215 16% 37%)" }}>
               {s.label}
             </div>
           </div>
@@ -376,10 +434,7 @@ export default function ResolutionTracker() {
       </div>
 
       {/* Footer */}
-      <div
-        className="mt-10 text-center text-[12px] font-mono"
-        style={{ color: "hsl(215 20% 27%)" }}
-      >
+      <div className="mt-10 text-center text-[12px] font-mono" style={{ color: "hsl(215 20% 27%)" }}>
         built with claude · ai resolution 2026
       </div>
     </div>
